@@ -7,7 +7,7 @@ import path from "path";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { generateFromAudio, generateFromText } from "./gemini.js";
-import say from "say";
+import gTTS from "gtts";
 
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
@@ -22,7 +22,7 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
 const upload = multer({ dest: uploadsDir });
 
-// SSE clients
+// -------------------- SSE Clients --------------------
 let clients = [];
 app.get("/stream", (req, res) => {
   res.set({
@@ -43,7 +43,7 @@ function broadcast(obj) {
   });
 }
 
-// Job & cancellation
+// -------------------- Job & Cancellation --------------------
 let currentJob = null;
 function startJob(meta = {}) {
   if (currentJob && !currentJob.cancelled) {
@@ -62,7 +62,7 @@ app.post("/interrupt", (req, res) => {
   res.json({ ok: true, message: "Nothing to interrupt" });
 });
 
-// Rate limiting
+// -------------------- Rate Limiting --------------------
 const RATE_LIMIT_TOKENS = parseFloat(process.env.RATE_LIMIT_TOKENS || "6");
 const RATE_LIMIT_REFILL_SEC = parseFloat(process.env.RATE_LIMIT_REFILL_SEC || "10");
 let tokens = RATE_LIMIT_TOKENS;
@@ -97,21 +97,28 @@ async function waitForToken(maxWaitMs = 2000) {
   return true;
 }
 
-// Helper to TTS & broadcast audio
+// -------------------- Helper: gTTS & Broadcast --------------------
 async function speakAndBroadcast(text, job) {
   if (!text || job.cancelled) return;
 
-  const audioFile = path.join(uploadsDir, `response-${Date.now()}.wav`);
+  const isHindi = /[\u0900-\u097F]/.test(text); // Detect Devanagari
+  const audioFile = path.join(uploadsDir, `response-${Date.now()}.mp3`);
+  
   return new Promise((resolve) => {
-    say.export(text, null, 1.0, audioFile, (err) => {
-      if (err) { console.error("TTS export failed:", err); resolve(); return; }
+    const tts = new gTTS(text, isHindi ? "hi" : "en");
+    tts.save(audioFile, async (err) => {
+      if (err) {
+        console.error("TTS save failed:", err);
+        resolve();
+        return;
+      }
       try {
         if (!job.cancelled) {
           const buffer = fs.readFileSync(audioFile);
           broadcast({ type: "response_audio", audio: buffer.toString("base64") });
         }
       } catch (e) {
-        console.error("Failed to read TTS audio:", e);
+        console.error("Failed to read audio file:", e);
       } finally {
         fs.unlink(audioFile, () => {});
         resolve();
@@ -120,7 +127,7 @@ async function speakAndBroadcast(text, job) {
   });
 }
 
-// -------------------- /voice endpoint --------------------
+// -------------------- /voice Endpoint --------------------
 app.post("/voice", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
@@ -138,12 +145,10 @@ app.post("/voice", upload.single("file"), async (req, res) => {
     const audioBase64 = fs.readFileSync(req.file.path).toString("base64");
     fs.unlink(req.file.path, () => {});
 
-    // Get the answer (You text)
     const assistantText = await generateFromAudio({ audioBase64, mimeType: req.body.mimeType || "audio/webm" });
 
     if (!assistantText || job.cancelled) return res.json({ ok: true, cancelled: true });
 
-    // Broadcast and speak the Gemini answer
     broadcast({ type: "assistant", text: assistantText });
     await speakAndBroadcast(assistantText, job);
 
@@ -155,7 +160,7 @@ app.post("/voice", upload.single("file"), async (req, res) => {
   }
 });
 
-// -------------------- /chat endpoint --------------------
+// -------------------- /chat Endpoint --------------------
 app.post("/chat", async (req, res) => {
   const { message } = req.body || {};
   if (!message) return res.status(400).json({ error: "Message required" });
@@ -167,12 +172,10 @@ app.post("/chat", async (req, res) => {
   broadcast({ type: "status", message: "Processing message..." });
 
   try {
-    // Get the answer (You text)
     const assistantText = await generateFromText(message);
 
     if (!assistantText || job.cancelled) return res.json({ ok: true, cancelled: true });
 
-    // Broadcast and speak the Gemini answer
     broadcast({ type: "assistant", text: assistantText });
     await speakAndBroadcast(assistantText, job);
 
@@ -184,6 +187,6 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// -------------------- Start server --------------------
+// -------------------- Start Server --------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
